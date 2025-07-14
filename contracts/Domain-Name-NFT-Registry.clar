@@ -7,6 +7,8 @@
 (define-constant err-invalid-name (err u103))
 (define-constant err-name-too-short (err u104))
 (define-constant err-unauthorized (err u105))
+(define-constant err-not-for-sale (err u106))
+(define-constant err-insufficient-payment (err u107))
 (define-constant min-length u3)
 (define-constant registration-period u52560)
 (define-constant name-price u100000000)
@@ -27,6 +29,11 @@
 (define-map name-resolvers
     { name: (string-ascii 50) }
     { btc: (optional (string-ascii 50)), stx: (optional principal) }
+)
+
+(define-map domain-marketplace
+    { name: (string-ascii 50) }
+    { seller: principal, price: uint, listed: bool }
 )
 
 (define-read-only (get-last-token-id)
@@ -53,6 +60,13 @@
 
 (define-read-only (resolve-name (name (string-ascii 50)))
     (match (map-get? name-resolvers {name: name})
+        entry (ok entry)
+        (err u404)
+    )
+)
+
+(define-read-only (get-domain-listing (name (string-ascii 50)))
+    (match (map-get? domain-marketplace {name: name})
         entry (ok entry)
         (err u404)
     )
@@ -148,6 +162,56 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
         (var-set dao-address new-address)
+        (ok true)
+    )
+)
+
+(define-public (list-domain-for-sale (name (string-ascii 50)) (price uint))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+        )
+        (asserts! (is-eq tx-sender (get owner domain)) err-not-owner)
+        (asserts! (> price u0) err-invalid-name)
+        (ok (map-set domain-marketplace
+            {name: name}
+            {seller: tx-sender, price: price, listed: true}
+        ))
+    )
+)
+
+(define-public (unlist-domain (name (string-ascii 50)))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (listing (unwrap! (map-get? domain-marketplace {name: name}) err-not-for-sale))
+        )
+        (asserts! (is-eq tx-sender (get owner domain)) err-not-owner)
+        (ok (map-set domain-marketplace
+            {name: name}
+            (merge listing {listed: false})
+        ))
+    )
+)
+
+(define-public (buy-domain (name (string-ascii 50)))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (listing (unwrap! (map-get? domain-marketplace {name: name}) err-not-for-sale))
+            (domain-owner (get owner domain))
+            (domain-id (get id domain))
+            (sale-price (get price listing))
+        )
+        (asserts! (get listed listing) err-not-for-sale)
+        (asserts! (not (is-eq tx-sender domain-owner)) err-not-owner)
+        (try! (stx-transfer? sale-price tx-sender domain-owner))
+        (try! (nft-transfer? domain-name domain-id domain-owner tx-sender))
+        (map-set domain-names
+            {name: name}
+            (merge domain {owner: tx-sender})
+        )
+        (map-delete domain-marketplace {name: name})
         (ok true)
     )
 )
