@@ -9,9 +9,12 @@
 (define-constant err-unauthorized (err u105))
 (define-constant err-not-for-sale (err u106))
 (define-constant err-insufficient-payment (err u107))
+(define-constant err-invalid-parent (err u108))
+(define-constant err-subdomain-exists (err u109))
 (define-constant min-length u3)
 (define-constant registration-period u52560)
 (define-constant name-price u100000000)
+(define-constant subdomain-price u10000000)
 
 (define-data-var last-domain-id uint u0)
 (define-data-var dao-address principal contract-owner)
@@ -34,6 +37,11 @@
 (define-map domain-marketplace
     { name: (string-ascii 50) }
     { seller: principal, price: uint, listed: bool }
+)
+
+(define-map subdomains
+    { parent: (string-ascii 50), subdomain: (string-ascii 50) }
+    { owner: principal, created: uint, active: bool }
 )
 
 (define-read-only (get-last-token-id)
@@ -68,6 +76,20 @@
 (define-read-only (get-domain-listing (name (string-ascii 50)))
     (match (map-get? domain-marketplace {name: name})
         entry (ok entry)
+        (err u404)
+    )
+)
+
+(define-read-only (get-subdomain-info (parent (string-ascii 50)) (subdomain (string-ascii 50)))
+    (match (map-get? subdomains {parent: parent, subdomain: subdomain})
+        entry (ok entry)
+        (err u404)
+    )
+)
+
+(define-read-only (is-valid-parent-domain (parent (string-ascii 50)))
+    (match (map-get? domain-names {name: parent})
+        domain (ok (and (> (get expires domain) burn-block-height) (is-eq tx-sender (get owner domain))))
         (err u404)
     )
 )
@@ -213,5 +235,51 @@
         )
         (map-delete domain-marketplace {name: name})
         (ok true)
+    )
+)
+
+(define-public (create-subdomain (parent (string-ascii 50)) (subdomain (string-ascii 50)))
+    (let
+        (
+            (parent-domain (unwrap! (map-get? domain-names {name: parent}) err-invalid-parent))
+            (subdomain-length (len subdomain))
+        )
+        (asserts! (is-eq tx-sender (get owner parent-domain)) err-not-owner)
+        (asserts! (> (get expires parent-domain) burn-block-height) err-expired)
+        (asserts! (>= subdomain-length min-length) err-name-too-short)
+        (asserts! (is-none (map-get? subdomains {parent: parent, subdomain: subdomain})) err-subdomain-exists)
+        (try! (stx-transfer? subdomain-price tx-sender (var-get dao-address)))
+        (ok (map-set subdomains
+            {parent: parent, subdomain: subdomain}
+            {owner: tx-sender, created: burn-block-height, active: true}
+        ))
+    )
+)
+
+(define-public (transfer-subdomain (parent (string-ascii 50)) (subdomain (string-ascii 50)) (new-owner principal))
+    (let
+        (
+            (subdomain-info (unwrap! (map-get? subdomains {parent: parent, subdomain: subdomain}) (err u404)))
+        )
+        (asserts! (is-eq tx-sender (get owner subdomain-info)) err-not-owner)
+        (asserts! (get active subdomain-info) err-not-for-sale)
+        (ok (map-set subdomains
+            {parent: parent, subdomain: subdomain}
+            (merge subdomain-info {owner: new-owner})
+        ))
+    )
+)
+
+(define-public (deactivate-subdomain (parent (string-ascii 50)) (subdomain (string-ascii 50)))
+    (let
+        (
+            (subdomain-info (unwrap! (map-get? subdomains {parent: parent, subdomain: subdomain}) (err u404)))
+            (parent-domain (unwrap! (map-get? domain-names {name: parent}) err-invalid-parent))
+        )
+        (asserts! (or (is-eq tx-sender (get owner subdomain-info)) (is-eq tx-sender (get owner parent-domain))) err-not-owner)
+        (ok (map-set subdomains
+            {parent: parent, subdomain: subdomain}
+            (merge subdomain-info {active: false})
+        ))
     )
 )
