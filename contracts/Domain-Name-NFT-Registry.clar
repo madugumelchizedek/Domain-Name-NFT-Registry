@@ -18,6 +18,7 @@
 
 (define-data-var last-domain-id uint u0)
 (define-data-var dao-address principal contract-owner)
+(define-data-var last-history-id uint u0)
 
 (define-map domain-names
     { name: (string-ascii 50) }
@@ -42,6 +43,21 @@
 (define-map subdomains
     { parent: (string-ascii 50), subdomain: (string-ascii 50) }
     { owner: principal, created: uint, active: bool }
+)
+
+(define-map domain-history
+    { history-id: uint }
+    { domain-name: (string-ascii 50), event-type: (string-ascii 20), from-owner: (optional principal), to-owner: principal, price: (optional uint), block-height: uint }
+)
+
+(define-map domain-history-by-name
+    { name: (string-ascii 50), index: uint }
+    { history-id: uint }
+)
+
+(define-map domain-analytics
+    { name: (string-ascii 50) }
+    { total-transfers: uint, last-sale-price: (optional uint), highest-sale-price: (optional uint), total-history-count: uint }
 )
 
 (define-read-only (get-last-token-id)
@@ -94,6 +110,65 @@
     )
 )
 
+(define-read-only (get-domain-history (history-id uint))
+    (match (map-get? domain-history {history-id: history-id})
+        entry (ok entry)
+        (err u404)
+    )
+)
+
+(define-read-only (get-domain-history-by-name (name (string-ascii 50)) (index uint))
+    (match (map-get? domain-history-by-name {name: name, index: index})
+        entry (match (map-get? domain-history {history-id: (get history-id entry)})
+            history (ok history)
+            (err u404)
+        )
+        (err u404)
+    )
+)
+
+(define-read-only (get-domain-analytics (name (string-ascii 50)))
+    (match (map-get? domain-analytics {name: name})
+        entry (ok entry)
+        (err u404)
+    )
+)
+
+(define-private (record-domain-history (name-str (string-ascii 50)) (event-type (string-ascii 20)) (from-owner (optional principal)) (to-owner principal) (price (optional uint)))
+    (let
+        (
+            (new-history-id (+ (var-get last-history-id) u1))
+            (current-analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name-str})))
+            (new-total-transfers (if (is-eq event-type "transfer") (+ (get total-transfers current-analytics) u1) (get total-transfers current-analytics)))
+            (new-last-sale-price (if (is-some price) price (get last-sale-price current-analytics)))
+            (new-highest-sale-price 
+                (match price
+                    sale-price (match (get highest-sale-price current-analytics)
+                        current-high (some (if (> sale-price current-high) sale-price current-high))
+                        (some sale-price)
+                    )
+                    (get highest-sale-price current-analytics)
+                )
+            )
+            (new-total-count (+ (get total-history-count current-analytics) u1))
+        )
+        (var-set last-history-id new-history-id)
+        (map-set domain-history
+            {history-id: new-history-id}
+            {domain-name: name-str, event-type: event-type, from-owner: from-owner, to-owner: to-owner, price: price, block-height: burn-block-height}
+        )
+        (map-set domain-history-by-name
+            {name: name-str, index: new-total-count}
+            {history-id: new-history-id}
+        )
+        (map-set domain-analytics
+            {name: name-str}
+            {total-transfers: new-total-transfers, last-sale-price: new-last-sale-price, highest-sale-price: new-highest-sale-price, total-history-count: new-total-count}
+        )
+        new-history-id
+    )
+)
+
 (define-public (preorder-name (name (string-ascii 50)) (paid uint))
     (begin
         (try! (stx-transfer? paid tx-sender contract-owner))
@@ -131,6 +206,7 @@
                 }
             )
             (map-delete name-preorders {name: name})
+            (record-domain-history name "register" none tx-sender none)
             (ok domain-id)
         )
     )
@@ -160,10 +236,12 @@
         )
         (asserts! (is-eq tx-sender current-owner) err-not-owner)
         (try! (nft-transfer? domain-name domain-id tx-sender new-owner))
-        (ok (map-set domain-names
+        (map-set domain-names
             {name: name}
             (merge domain {owner: new-owner})
-        ))
+        )
+        (record-domain-history name "transfer" (some current-owner) new-owner none)
+        (ok true)
     )
 )
 
@@ -234,6 +312,7 @@
             (merge domain {owner: tx-sender})
         )
         (map-delete domain-marketplace {name: name})
+        (record-domain-history name "sale" (some domain-owner) tx-sender (some sale-price))
         (ok true)
     )
 )
