@@ -134,6 +134,230 @@
     )
 )
 
+;; Advanced Analytics Functions
+(define-read-only (get-domain-reputation-score (name (string-ascii 50)))
+    (let
+        (
+            (domain-info (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+            (domain-age (- burn-block-height (- (get expires domain-info) registration-period)))
+            (transfer-score (* (get total-transfers analytics) u10))
+            (age-score (/ domain-age u1000))
+            (sale-score (match (get highest-sale-price analytics)
+                highest-price (/ highest-price u1000000)
+                u0
+            ))
+        )
+        (ok (+ transfer-score age-score sale-score))
+    )
+)
+
+(define-read-only (get-platform-analytics)
+    (let
+        (
+            (total-domains (var-get last-domain-id))
+            (current-height burn-block-height)
+        )
+        (ok {
+            total-domains: total-domains,
+            total-history-events: (var-get last-history-id),
+            current-block-height: current-height,
+            registration-price: name-price,
+            subdomain-price: subdomain-price
+        })
+    )
+)
+
+(define-read-only (get-domain-market-stats (name (string-ascii 50)))
+    (let
+        (
+            (domain-info (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+            (listing (map-get? domain-marketplace {name: name}))
+            (is-listed (match listing
+                market-entry (get listed market-entry)
+                false
+            ))
+            (current-price (match listing
+                market-entry (some (get price market-entry))
+                none
+            ))
+        )
+        (ok {
+            name: name,
+            owner: (get owner domain-info),
+            expires: (get expires domain-info),
+            is-listed: is-listed,
+            current-price: current-price,
+            last-sale-price: (get last-sale-price analytics),
+            highest-sale-price: (get highest-sale-price analytics),
+            total-transfers: (get total-transfers analytics),
+            days-until-expiry: (if (> (get expires domain-info) burn-block-height)
+                (/ (- (get expires domain-info) burn-block-height) u144)
+                u0
+            )
+        })
+    )
+)
+
+(define-read-only (is-domain-premium (name (string-ascii 50)))
+    (let
+        (
+            (name-len (len name))
+            (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+            (has-high-activity (> (get total-transfers analytics) u5))
+            (has-valuable-sales (match (get highest-sale-price analytics)
+                highest (> highest (* name-price u5))
+                false
+            ))
+        )
+        (ok (or 
+            (is-eq name-len u3)
+            (is-eq name-len u4)
+            has-high-activity
+            has-valuable-sales
+        ))
+    )
+)
+
+(define-read-only (get-domain-activity-level (name (string-ascii 50)))
+    (let
+        (
+            (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+            (total-activity (get total-history-count analytics))
+        )
+        (ok (if (>= total-activity u10)
+            "high"
+            (if (>= total-activity u3)
+                "medium"
+                "low"
+            )
+        ))
+    )
+)
+
+(define-read-only (estimate-domain-value (name (string-ascii 50)))
+    (let
+        (
+            (domain-info (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+            (name-len (len name))
+            (base-value (if (<= name-len u4) (* name-price u3) name-price))
+            (activity-multiplier (+ u100 (* (get total-transfers analytics) u20)))
+            (scarcity-bonus (if (<= name-len u3) u200 u100))
+        )
+        (ok (/ (* base-value activity-multiplier scarcity-bonus) u10000))
+    )
+)
+
+;; Domain Search and Filter Functions
+(define-read-only (check-domain-by-length-range (name (string-ascii 50)) (min-len uint) (max-len uint))
+    (let
+        (
+            (name-len (len name))
+        )
+        (ok (and (>= name-len min-len) (<= name-len max-len)))
+    )
+)
+
+(define-read-only (check-domain-price-range (name (string-ascii 50)) (min-price uint) (max-price uint))
+    (let
+        (
+            (listing (map-get? domain-marketplace {name: name}))
+        )
+        (match listing
+            market-entry (ok (and 
+                (get listed market-entry)
+                (>= (get price market-entry) min-price)
+                (<= (get price market-entry) max-price)
+            ))
+            (ok false)
+        )
+    )
+)
+
+(define-read-only (check-domain-expiry-range (name (string-ascii 50)) (min-blocks uint) (max-blocks uint))
+    (let
+        (
+            (domain-info (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (blocks-until-expiry (if (> (get expires domain-info) burn-block-height)
+                (- (get expires domain-info) burn-block-height)
+                u0
+            ))
+        )
+        (ok (and (>= blocks-until-expiry min-blocks) (<= blocks-until-expiry max-blocks)))
+    )
+)
+
+(define-read-only (check-domain-owner-match (name (string-ascii 50)) (target-owner principal))
+    (let
+        (
+            (domain-info (unwrap! (map-get? domain-names {name: name}) (err u404)))
+        )
+        (ok (is-eq (get owner domain-info) target-owner))
+    )
+)
+
+(define-read-only (check-domain-transfer-count (name (string-ascii 50)) (min-transfers uint))
+    (let
+        (
+            (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+        )
+        (ok (>= (get total-transfers analytics) min-transfers))
+    )
+)
+
+(define-read-only (is-domain-available-for-registration (name (string-ascii 50)))
+    (let
+        (
+            (name-len (len name))
+            (existing-domain (map-get? domain-names {name: name}))
+        )
+        (ok (and 
+            (>= name-len min-length)
+            (is-none existing-domain)
+        ))
+    )
+)
+
+(define-read-only (get-domain-search-metadata (name (string-ascii 50)))
+    (match (map-get? domain-names {name: name})
+        domain-info (let
+            (
+                (analytics (default-to {total-transfers: u0, last-sale-price: none, highest-sale-price: none, total-history-count: u0} (map-get? domain-analytics {name: name})))
+                (listing (map-get? domain-marketplace {name: name}))
+                (reputation (unwrap-panic (get-domain-reputation-score name)))
+                (is-premium (unwrap-panic (is-domain-premium name)))
+                (activity-level (unwrap-panic (get-domain-activity-level name)))
+            )
+            (ok {
+                name: name,
+                length: (len name),
+                owner: (get owner domain-info),
+                expires: (get expires domain-info),
+                blocks-until-expiry: (if (> (get expires domain-info) burn-block-height)
+                    (- (get expires domain-info) burn-block-height)
+                    u0
+                ),
+                total-transfers: (get total-transfers analytics),
+                reputation-score: reputation,
+                is-premium: is-premium,
+                activity-level: activity-level,
+                is-listed: (match listing
+                    market-entry (get listed market-entry)
+                    false
+                ),
+                current-price: (match listing
+                    market-entry (some (get price market-entry))
+                    none
+                ),
+                estimated-value: (unwrap-panic (estimate-domain-value name))
+            })
+        )
+        (err u404)
+    )
+)
+
 (define-private (record-domain-history (name-str (string-ascii 50)) (event-type (string-ascii 20)) (from-owner (optional principal)) (to-owner principal) (price (optional uint)))
     (let
         (
