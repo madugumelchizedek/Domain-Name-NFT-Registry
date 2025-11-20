@@ -11,8 +11,11 @@
 (define-constant err-insufficient-payment (err u107))
 (define-constant err-invalid-parent (err u108))
 (define-constant err-subdomain-exists (err u109))
+(define-constant err-domain-not-expired (err u110))
+(define-constant err-grace-period-expired (err u111))
 (define-constant min-length u3)
 (define-constant registration-period u52560)
+(define-constant grace-period-blocks u5)
 (define-constant name-price u100000000)
 (define-constant subdomain-price u10000000)
 
@@ -58,6 +61,11 @@
 (define-map domain-analytics
     { name: (string-ascii 50) }
     { total-transfers: uint, last-sale-price: (optional uint), highest-sale-price: (optional uint), total-history-count: uint }
+)
+
+(define-map grace-period-tracker
+    { name: (string-ascii 50) }
+    { grace-start-block: uint, original-owner: principal, is-recoverable: bool }
 )
 
 (define-read-only (get-last-token-id)
@@ -320,6 +328,54 @@
     )
 )
 
+(define-read-only (check-grace-period-status (name (string-ascii 50)))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (grace-info (map-get? grace-period-tracker {name: name}))
+            (domain-expired (< (get expires domain) burn-block-height))
+        )
+        (match grace-info
+            grace-entry (let
+                (
+                    (blocks-in-grace (- burn-block-height (get grace-start-block grace-entry)))
+                    (grace-active (< blocks-in-grace grace-period-blocks))
+                )
+                (ok {
+                    in-grace-period: grace-active,
+                    blocks-remaining: (if grace-active (- grace-period-blocks blocks-in-grace) u0),
+                    original-owner: (get original-owner grace-entry),
+                    is-recoverable: (get is-recoverable grace-entry)
+                })
+            )
+            (ok {
+                in-grace-period: false,
+                blocks-remaining: u0,
+                original-owner: (get owner domain),
+                is-recoverable: false
+            })
+        )
+    )
+)
+
+(define-read-only (is-domain-in-grace-period (name (string-ascii 50)))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (grace-info (map-get? grace-period-tracker {name: name}))
+        )
+        (match grace-info
+            grace-entry (let
+                (
+                    (blocks-in-grace (- burn-block-height (get grace-start-block grace-entry)))
+                )
+                (ok (< blocks-in-grace grace-period-blocks))
+            )
+            (ok false)
+        )
+    )
+)
+
 (define-read-only (get-domain-search-metadata (name (string-ascii 50)))
     (match (map-get? domain-names {name: name})
         domain-info (let
@@ -444,9 +500,49 @@
         )
         (asserts! (is-eq tx-sender current-owner) err-not-owner)
         (try! (stx-transfer? name-price tx-sender contract-owner))
+        (map-delete grace-period-tracker {name: name})
         (ok (map-set domain-names
             {name: name}
             (merge domain {expires: (+ burn-block-height registration-period)})
+        ))
+    )
+)
+
+(define-public (recover-expired-domain (name (string-ascii 50)))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (grace-info (unwrap! (map-get? grace-period-tracker {name: name}) (err u404)))
+            (blocks-in-grace (- burn-block-height (get grace-start-block grace-info)))
+            (current-owner (get owner domain))
+        )
+        (asserts! (< (get expires domain) burn-block-height) err-domain-not-expired)
+        (asserts! (< blocks-in-grace grace-period-blocks) err-grace-period-expired)
+        (asserts! (is-eq tx-sender current-owner) err-not-owner)
+        (try! (stx-transfer? name-price tx-sender contract-owner))
+        (map-delete grace-period-tracker {name: name})
+        (ok (map-set domain-names
+            {name: name}
+            (merge domain {expires: (+ burn-block-height registration-period)})
+        ))
+    )
+)
+
+(define-public (enter-grace-period (name (string-ascii 50)))
+    (let
+        (
+            (domain (unwrap! (map-get? domain-names {name: name}) (err u404)))
+            (current-owner (get owner domain))
+        )
+        (asserts! (and (< (get expires domain) burn-block-height) (>= (+ (get expires domain) (* grace-period-blocks u1)) burn-block-height)) err-grace-period-expired)
+        (asserts! (is-none (map-get? grace-period-tracker {name: name})) err-already-registered)
+        (ok (map-set grace-period-tracker
+            {name: name}
+            {
+                grace-start-block: (get expires domain),
+                original-owner: current-owner,
+                is-recoverable: true
+            }
         ))
     )
 )
@@ -584,5 +680,12 @@
             {parent: parent, subdomain: subdomain}
             (merge subdomain-info {active: false})
         ))
+    )
+)
+
+(define-public (clear-grace-period (name (string-ascii 50)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+        (ok (map-delete grace-period-tracker {name: name}))
     )
 )
